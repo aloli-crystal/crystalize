@@ -1,0 +1,52 @@
+= crystalize
+:toc: left
+:source-highlighter: rouge
+
+Packages a Ruby (Rails) application, taken from a git branch, into a
+**single executable**: Crystal launcher + relocatable Ruby + gems +
+application code precompiled to YARV bytecode. Secrets stay outside the
+binary (age-encrypted YAML), so does the database; Active Storage files are
+kept clear or encrypted on disk.
+
+French documentation (reference): link:README.fr.adoc[README.fr.adoc].
+
+== In short
+
+[source,shell]
+----
+shards build --release
+crystalize init -n myapp       # writes crystalize.yml in the app repository
+crystalize build               # → build/myapp (built from app.branch)
+myapp config > myapp.yml       # runtime configuration template
+myapp secrets-template         # secrets template, encrypt it with age
+myapp migrate && myapp         # db:prepare, then serve
+----
+
+* Without a payload, `crystalize` is the build tool; with one, it is the
+  launcher of the application it carries.
+* The payload is extracted once per version into
+  `<state_dir>/releases/<id>`, its SHA-256 checked; bytecode paths are
+  rewritten in place so `__FILE__` / `__dir__` are real paths.
+* Absolute paths, `..` and symlinks leaving the archive (or whose target
+  goes through another symlink) are refused, at build time already.
+* `state_dir` must stay under ~140 characters, with no blank and no `:`
+  (`RUBYOPT`, where Bundler also writes an absolute path, is split on
+  blanks; `RUBYLIB` and `PATH` on `:`).
+* `.rb` files are replaced by stubs; `require`/`load` go through the
+  `RubyVM::InstructionSequence.load_iseq` hook.
+* Storage modes: `none`, `clear` (Disk service), `encrypted`
+  (`EncryptedDisk`: chunked AES-256-GCM, range reads, proxy URLs).
+* `crystalize package` turns the executable into a FreeBSD `pkg`: binary,
+  `rc.d` script (`daemon(8)`, `service <app> migrate`), configuration
+  sample, service user and directories created on install, dependencies
+  detected from the shared libraries (`ldd` + `pkg which`).
+* `app.repository` may be a git URL (private repositories: git does the
+  authentication — SSH agent, `~/.ssh/config` aliases, `app.ssh_key`
+  deploy key, credential helper); `build.pass_env` forwards private gem
+  credentials such as `BUNDLE_GITHUB__COM`.
+* `crystalize port` writes a FreeBSD port (poudriere overlay) with no secret
+  in it: Ruby and the gems are public distfiles; the private application
+  sources are fetched on the builder before the bulk, with a read-only
+  deploy key (`files/crystalize-source`, beryl's `crystalize-fetch.sh`).
+* Build on the target platform (same OS, architecture and shared
+  libraries): Ruby and native extensions are not portable.

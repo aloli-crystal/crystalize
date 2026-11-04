@@ -1,0 +1,31 @@
+= Journal des modifications
+
+== 0.1.1
+
+* `crystalize package` : paquet pkg FreeBSD (script rc.d sous `daemon(8)`,
+  utilisateur et groupe dédiés, dossiers, configuration `@sample`,
+  dépendances détectées par `ldd`).
+* `crystalize port` : port FreeBSD pour poudriere, sans secret ; sources
+  privées récupérées sur le builder avant le bulk (clé posée par beryl),
+  commit vérifié à l'extraction ; `crystalize build --from-dist` hors ligne.
+* Dépôt source distant (URL git, miroir en cache, `ssh_key`) et
+  `build.pass_env` pour les identifiants Bundler.
+* Liens symboliques validés à la construction et à l'extraction,
+  `compiled.txt` vérifié, `state_dir` résolu, fichier partiel supprimé en
+  cas d'échec d'envoi Active Storage.
+
+== 0.1.0
+
+Première version.
+
+* `crystalize build` : branche git → Ruby relocatable (construit et mis en
+  cache) → `bundle install` en mode déploiement → commandes de construction
+  → élagage → compilation en pseudo-code YARV → archive tar.gz déterministe
+  ajoutée au lanceur.
+* Lanceur : extraction vérifiée (SHA-256) par version, réécriture des
+  chemins dans le pseudo-code, dossiers inscriptibles redirigés vers
+  `state_dir`, secrets YAML chiffrés par `age`, commandes nommées avec
+  `${VAR:-défaut}`, `exec`, `extract`, `config`, `secrets-template`,
+  `storage-key`, `version`.
+* GED Active Storage en clair ou chiffrée (`EncryptedDisk`, AES-256-GCM
+  par blocs de 64 Kio).

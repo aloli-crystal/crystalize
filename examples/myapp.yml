@@ -1,0 +1,11 @@
+# Configuration d'exécution d'exemple (myapp config > myapp.yml).
+state_dir: /var/db/myapp
+env:
+  BIND: 127.0.0.1
+  PORT: 3000
+secrets:
+  file: /usr/local/etc/myapp/secrets.age
+  identity: /usr/local/etc/myapp/age.key
+storage:
+  mode: encrypted
+  path: /var/db/myapp/ged

@@ -1,0 +1,36 @@
+# crystalize : empaquetage de myapp en un exécutable unique.
+app:
+  name: myapp
+  repository: .
+  branch: production
+
+ruby:
+  version: 3.4.10
+  # sha256: …   # recommandé : vérifie l'archive des sources
+
+bundle:
+  without: [development, test]
+  # build_config:
+  #   pg: --with-pg-config=/usr/local/bin/pg_config
+
+build:
+  env:
+    RAILS_ENV: production
+    SECRET_KEY_BASE_DUMMY: "1"
+  commands:
+    - bin/rails assets:precompile
+
+runtime:
+  env:
+    RAILS_ENV: production
+  default_command: serve
+  commands:
+    serve: [bin/rails, server, -b, "${BIND:-127.0.0.1}", -p, "${PORT:-3000}"]
+    console: [bin/rails, console]
+    migrate: [bin/rails, "db:prepare"]
+    rails: [bin/rails]
+
+# Chemins retirés de la charge utile (en plus des valeurs par défaut).
+prune: []
+
+output: build/myapp

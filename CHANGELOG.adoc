@@ -1,0 +1,16 @@
+= Changelog
+
+== 0.1.1
+
+`crystalize package` (FreeBSD pkg with rc.d script, user, directories and
+detected dependencies), `crystalize port` (secret-free poudriere port, private
+sources fetched on the builder before the bulk, `build --from-dist`), remote
+git source with `ssh_key`, `build.pass_env`, and hardened symlink,
+`compiled.txt` and `state_dir` checks.
+
+== 0.1.0
+
+First release: `crystalize build` (git branch → relocatable Ruby → bundle →
+build commands → YARV bytecode → deterministic payload appended to the
+launcher), launcher with verified extraction, age-encrypted secrets and
+clear or encrypted Active Storage.

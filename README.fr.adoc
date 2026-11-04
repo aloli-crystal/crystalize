@@ -1,0 +1,409 @@
+= crystalize
+:toc: left
+:toclevels: 2
+:source-highlighter: rouge
+
+Empaquette une application Ruby (Rails), prise sur une branche git, en
+**un seul exécutable** : lanceur Crystal + Ruby relocatable + gems + code
+de l'application précompilé en pseudo-code YARV. Les secrets restent hors
+du binaire (YAML chiffré par `age`), la base de données aussi ; la GED
+(Active Storage) est stockée en clair ou chiffrée sur le disque.
+
+Version anglaise : link:README.adoc[README.adoc].
+
+== Principe
+
+[source]
+----
+ crystalize build                                   exécutable produit
+ ─────────────────                                  ──────────────────
+ git archive <branche>  ─┐                          ┌─ lanceur Crystal (= crystalize)
+ Ruby relocatable ───────┤  bundle install          │
+   (construit en cache)  ├─ assets:precompile ──────┼─ tar.gz déterministe
+ gems (vendor/bundle) ───┤  .rb → .yarb (YARV)      │    .crystalize/manifest.yml
+ support crystalize ─────┘                          │    app/  (code + gems)
+                                                    │    ruby/ (interpréteur)
+                                                    └─ sha256 | taille | "CRYSTLZ1"
+----
+
+Un seul programme : **sans charge utile**, `crystalize` est l'outil de
+construction ; **avec**, c'est le lanceur de l'application qu'il porte.
+Le binaire d'une application est donc une copie de `crystalize` à laquelle
+on a ajouté l'archive.
+
+Au lancement, l'exécutable :
+
+. lit sa configuration d'exécution (`<app>.yml`) ;
+. extrait l'archive (une seule fois par version, empreinte SHA-256
+  vérifiée, chemins absolus et `..` refusés) dans
+  `<state_dir>/releases/<id>`. Les liens symboliques sont créés en dernier
+  et refusés s'ils sortent de l'archive ou si leur cible passe par un
+  autre lien ; la construction applique déjà ce contrôle ;
+. déchiffre les secrets avec `age` ;
+. prépare l'environnement (Ruby embarqué, Bundler en mode déploiement,
+  GED) et se **remplace** (`exec`) par la commande demandée : Puma reçoit
+  directement les signaux.
+
+=== Pseudo-code YARV
+
+Chaque `.rb` retenu est compilé par le Ruby embarqué
+(`RubyVM::InstructionSequence#to_binary`) en `<fichier>.rb.yarb` ; la
+source est remplacée par un bouchon. Au démarrage,
+`.crystalize/lib/crystalize/boot.rb` (chargé par `RUBYOPT=-rcrystalize/boot`,
+trouvé via `RUBYLIB`) installe le crochet
+`RubyVM::InstructionSequence.load_iseq` : `require`, `require_relative`,
+`load` et l'autoload Zeitwerk chargent le pseudo-code.
+
+Le pseudo-code fige le chemin de chaque fichier (`__FILE__`, `__dir__`).
+Il est donc compilé sous un préfixe fictif de 160 octets ; le lanceur
+extrait chaque version dans un dossier dont le chemin réel a exactement
+cette longueur (`<id>____…`) et y substitue le préfixe, octet pour octet.
+Conséquence : `state_dir` doit rester sous ~140 caractères, sans blanc ni
+`:` (`RUBYOPT`, où Bundler inscrit aussi un chemin absolu, est découpé sur
+les blancs ; `RUBYLIB` et `PATH` sur `:`).
+
+Si un bouchon est relu comme source (`eval(File.read(f), …, f)`, cas des
+locales I18n en `.rb`), il exécute lui-même son pseudo-code. Seuls les
+fichiers DSL relus par `instance_eval(File.read(…))` doivent rester en
+source : `config/puma.rb`, `config/importmap.rb`, `config/ci.rb` sont
+exclus par défaut ; en cas d'oubli, l'erreur nomme le fichier à ajouter à
+`compile.exclude`.
+
+NOTE: Le pseudo-code n'est pas un chiffrement : il protège du regard,
+pas d'un désassemblage déterminé (`RubyVM::InstructionSequence#disasm`).
+Les vues ERB restent en clair.
+
+== Prérequis
+
+* Crystal ≥ 1.19, `git`, `tar`, un compilateur C (construction de Ruby).
+* Bibliothèques de construction de Ruby : OpenSSL, libyaml, libffi
+  (macOS : Homebrew ; FreeBSD : `pkg install libyaml libffi`).
+* Celles des extensions natives des gems (`pg` : `libpq` / `pg_config`).
+* À l'exécution : `age`, et les bibliothèques partagées ci-dessus sur la
+  machine cible.
+
+IMPORTANT: Ruby et les extensions natives ne sont pas portables : on
+construit **sur le système qui exécutera** le binaire (même OS, même
+architecture, mêmes versions de bibliothèques). Pour un serveur
+FreeBSD 15, on lance `crystalize build` sur un FreeBSD 15 (jail de
+construction, poudriere-builder…).
+
+== Installation
+
+[source,shell]
+----
+shards build --release
+ln -s "$PWD/bin/crystalize" ~/bin/
+----
+
+== Construire une application
+
+Dans le dépôt de l'application :
+
+[source,shell]
+----
+crystalize init -n smsi     # écrit crystalize.yml
+crystalize build            # → build/smsi
+crystalize build -b production -o /tmp/smsi
+crystalize inspect build/smsi
+----
+
+La première construction compile Ruby (quelques minutes), mis en cache
+dans `~/.cache/crystalize/rubies/` (voir `CRYSTALIZE_CACHE`). Le code est
+toujours pris sur la **branche** (`git archive`) : les modifications non
+commitées n'entrent pas dans le binaire.
+
+=== `crystalize.yml`
+
+[source,yaml]
+----
+app:
+  name: smsi
+  repository: .            # chemin local, ou git@github.aloli:aloli/smsi.git
+  branch: production
+  # ssh_key: ~/.ssh/deploy_smsi   # clé de déploiement (sinon agent SSH)
+
+ruby:
+  version: 3.4.10          # à défaut : .ruby-version, puis Gemfile.lock
+  sha256: ecee2d07…        # vérifie l'archive des sources
+  # configure_opts: [...]  # remplace les options détectées
+
+bundle:
+  without: [development, test]
+  # build_config: { pg: "--with-pg-config=/usr/local/bin/pg_config" }
+
+build:
+  env: { RAILS_ENV: production, SECRET_KEY_BASE_DUMMY: "1" }
+  # pass_env: [BUNDLE_GITHUB__COM]   # repris de l'environnement, jamais écrit ici
+  commands:
+    - bin/rails assets:precompile
+
+compile:
+  enabled: true
+  strip_sources: true      # ne livrer que le pseudo-code
+  include: [app/**/*.rb, lib/**/*.rb, config/**/*.rb, vendor/bundle/ruby/*/gems/**/*.rb]
+  exclude: [config/puma.rb, config/importmap.rb, config/ci.rb, "**/templates/**", "**/test/**", "**/spec/**"]
+
+runtime:
+  env: { RAILS_ENV: production }
+  default_command: serve
+  commands:                # ${VAR}, ${VAR:-défaut} remplacés ici (pas dans les arguments saisis)
+    serve: [bin/rails, server, -b, "${BIND:-127.0.0.1}", -p, "${PORT:-3000}"]
+    console: [bin/rails, console]
+    migrate: [bin/rails, "db:prepare"]
+    rails: [bin/rails]
+  writable: [log, tmp, storage]   # redirigés vers state_dir
+  rails: true              # injecte l'initialiseur Active Storage
+
+prune: [test-old, manus]   # en plus de .git, test, spec, caches de gems…
+output: build/smsi
+----
+
+Pour une autre application, seul ce fichier change : la mécanique
+(extraction, bundle, compilation, archive, lanceur) est la même.
+
+=== Dépôt privé
+
+`app.repository` accepte une URL git (`git@hôte:org/app.git`,
+`ssh://…`, `https://…`) : crystalize en tient un miroir dans
+`~/.cache/crystalize/repos/` et le met à jour à chaque construction.
+Aucun identifiant n'est stocké par crystalize : c'est git qui
+s'authentifie, comme pour un `git clone` à la main.
+
+* **SSH** (recommandé) : l'agent SSH et `~/.ssh/config` sont honorés, alias
+  d'hôte compris (`git@github.aloli:aloli/smsi.git`). Pour une machine de
+  construction, préférez une *clé de déploiement* en lecture seule,
+  désignée par `app.ssh_key` (`ssh -i … -o IdentitiesOnly=yes`) ; si elle a
+  une phrase de passe, chargez-la dans l'agent.
+* **HTTPS** : le gestionnaire d'identifiants de git
+  (`git config --global credential.helper …`) ; jamais de jeton dans l'URL.
+* **Gems privées** (`git:`/`github:` privés, serveur de gems) : Bundler lit
+  ses identifiants dans `BUNDLE_<HÔTE>` (`BUNDLE_GITHUB__COM=x-access-token:…`).
+  crystalize écarte toutes les variables `BUNDLE_*` de l'appelant ; nommez
+  celles à transmettre dans `build.pass_env`, et exportez-les au moment de
+  la construction :
++
+[source,shell]
+----
+BUNDLE_GITHUB__COM="x-access-token:$(cat ~/.config/smsi/github-token)" crystalize build
+----
+
+== Exécuter
+
+[source,shell]
+----
+smsi config > /usr/local/etc/smsi.yml          # modèle de configuration
+smsi secrets-template > secrets.yml            # modèle de secrets
+age-keygen -o /usr/local/etc/smsi/age.key
+age -e -r "$(age-keygen -y /usr/local/etc/smsi/age.key)" \
+    -o /usr/local/etc/smsi/secrets.age secrets.yml && rm secrets.yml
+
+smsi migrate                  # bin/rails db:prepare
+smsi                          # commande par défaut (serve)
+smsi console
+smsi rails runner 'p User.count'
+smsi exec ruby -v             # n'importe quelle commande, dans l'environnement
+smsi version
+----
+
+=== `<app>.yml` (configuration d'exécution)
+
+Recherché dans : `-c FICHIER`, `$SMSI_CONFIG`, `./smsi.yml`,
+`/usr/local/etc/smsi.yml`, `/etc/smsi.yml`.
+
+[source,yaml]
+----
+state_dir: /var/db/smsi     # releases/, log/, tmp/, storage/, ged/
+env:                        # variables non secrètes
+  BIND: 127.0.0.1
+  PORT: 3000
+secrets:
+  file: /usr/local/etc/smsi/secrets.age   # ou .yml en clair (0600)
+  identity: /usr/local/etc/smsi/age.key   # sinon $CRYSTALIZE_AGE_IDENTITY,
+                                          # sinon phrase de passe
+storage:
+  mode: encrypted           # none | clear | encrypted
+  path: /var/db/smsi/ged
+----
+
+=== Secrets
+
+[source,yaml]
+----
+env:
+  SECRET_KEY_BASE: …
+  RAILS_MASTER_KEY: …
+  DATABASE_URL: postgres://smsi:…@localhost/smsi_production
+storage_key: …   # 32 octets en Base64 (smsi storage-key)
+----
+
+Ordre de priorité de l'environnement : `runtime.env` du manifeste <
+`env` de la configuration < `env` des secrets < variables du lanceur.
+
+== Paquet FreeBSD
+
+[source,shell]
+----
+crystalize build
+crystalize package             # → build/smsi-<version>.pkg
+pkg add build/smsi-<version>.pkg
+----
+
+`crystalize package [BINAIRE]` (par défaut : `output` de `crystalize.yml`,
+paquet écrit à côté, ou dans `-o DOSSIER`) produit un paquet `pkg` qui :
+
+* installe `<prefix>/bin/<app>`, le script `<prefix>/etc/rc.d/<app>` et le
+  modèle `<prefix>/etc/<app>.yml.sample` (copié en `<app>.yml` s'il
+  n'existe pas, `@sample`) ;
+* crée à l'installation le groupe et l'utilisateur du service (`pw`,
+  shell `nologin`, uid/gid facultatifs), le dossier des secrets
+  `<prefix>/etc/<app>` (`root:<groupe>`, 0750) et le dossier d'état
+  (`<utilisateur>`, 0750) ;
+* dépend des paquets qui fournissent les bibliothèques partagées du
+  lanceur, de Ruby et des extensions natives (`ldd` sur les fichiers ELF
+  de la charge utile, puis `pkg which`), plus ceux de `package.depends`
+  (`age` par défaut) ; versions et origines sont celles de la machine de
+  construction ;
+* affiche à l'installation les étapes restantes (secrets, migrations,
+  activation).
+
+Le script rc.d lance l'application sous `daemon(8)` (relancée si elle
+meurt, sortie vers syslog, privilèges abandonnés par `-u`) :
+
+[source,shell]
+----
+sysrc smsi_enable=YES          # smsi_config, smsi_user, smsi_command, smsi_env
+service smsi migrate           # bin/rails db:prepare, sous l'utilisateur du service
+service smsi start
+----
+
+La clé `age` doit être lisible par l'utilisateur du service : une phrase
+de passe n'est pas utilisable au démarrage.
+
+[source,yaml]
+----
+package:                       # crystalize.yml, toutes les clés facultatives
+  name: smsi                   # défaut : app.name
+  version: 1.4.2               # défaut : date du commit, AAAA.MM.JJ.HHMMSS
+  maintainer: admin@example.org
+  prefix: /usr/local
+  user: smsi                   # groupe : group, identifiants : uid, gid
+  state_dir: /var/db/smsi
+  depends: [age]
+  detect_depends: true
+  rc_require: [LOGIN, postgresql]
+  rc_command: serve            # défaut : runtime.default_command
+----
+
+Hors FreeBSD (où `pkg` manque), seuls l'arbre, `+MANIFEST` et `pkg-plist`
+sont écrits, sans dépendances ; la commande `pkg create` à lancer est
+affichée.
+
+== Port FreeBSD (poudriere)
+
+`crystalize port` écrit le port d'une application dans un arbre de ports
+(overlay poudriere), à côté des autres ports de la maison ; poudriere le
+construit et le publie, les serveurs l'installent par `pkg install`.
+
+[source,shell]
+----
+crystalize port -c crystalize.yml -o ~/prod-aloli/aloli-freebsd-ports
+git -C ~/prod-aloli/aloli-freebsd-ports add security/smsi
+git -C ~/prod-aloli/aloli-freebsd-ports commit -m "security/smsi : …"
+git -C ~/prod-aloli/aloli-freebsd-ports push
+----
+
+Le port ne contient **aucun secret** et peut vivre dans un arbre public :
+
+* Ruby et chaque gem du `Gemfile.lock` (variante source, celle que Bundler
+  installe sous FreeBSD) sont des distfiles publics (ruby-lang.org,
+  rubygems.org), avec leurs empreintes dans `distinfo` ;
+* les sources de l'application, au commit de `app.branch`, sont décrites
+  dans `files/crystalize-source` : URL du dépôt, commit, nom de l'archive,
+  **chemin** de la clé de déploiement sur le builder ;
+* la construction, sans réseau, compile les gems natives et lance
+  `crystalize build --from-dist` (paquet `devel/crystalize`) ; le binaire
+  est installé par `INSTALL_SCRIPT` (un `strip` effacerait la charge utile),
+  avec le script rc.d, le modèle de configuration, l'utilisateur et les
+  dossiers (comme `crystalize package`).
+
+=== Sources privées : clé sur le builder, récupération avant le bulk
+
+Le jail n'a ni la clé ni le réseau à l'extraction. Sur le builder, la
+recette beryl `poudriere-builder` :
+
+. dépose la clé en lecture seule, tirée du coffre (`[builder]
+  SMSI_DEPLOY_KEY` → `/usr/local/etc/poudriere.d/keys/smsi`, 0400), et les
+  clés d'hôte de GitHub (`keys/known_hosts`, vérification stricte) ;
+. lance, avant le bulk (`reapply`), `crystalize-fetch.sh` : pour chaque
+  `*/*/files/crystalize-source` des arbres de poudriere, il récupère le
+  commit par SSH (`git fetch --depth 1`), vérifie son empreinte et dépose
+  `git archive` dans les distfiles (`crystalize/<nom>-<commit>.tar`) ;
+. le port, à l'extraction, revérifie que l'archive est bien celle du commit
+  (en-tête de `git archive`).
+
+[source,yaml]
+----
+port:                          # crystalize.yml
+  category: security           # obligatoire : propre à chaque application
+  source_url: git@github.com:aloli/smsi.git   # dépôt vu du builder
+  key: /usr/local/etc/poudriere.d/keys/smsi   # défaut : keys/<nom>
+  lib_depends: ["libpq.so.5:databases/postgresql18-client"]
+  build_depends: []
+  run_depends: ["age:security/age"]
+  crystalize_origin: devel/crystalize
+----
+
+Points d'attention :
+
+* le `Gemfile.lock` **commité** doit contenir la plate-forme du jail
+  (`bundle lock --add-platform x86_64-freebsd-15`) : en mode figé, Bundler
+  refuse une plate-forme absente ;
+* gems de rubygems.org seulement : une source `git:` ou `path:` est refusée,
+  comme une gem qui n'existe qu'en variantes précompilées ;
+* `lib_depends` : bibliothèques des extensions natives (`pg` → `libpq`) ;
+* `build.commands` tourne hors ligne : `importmap` et `propshaft`
+  conviennent, pas un `yarn install` ;
+* `DISTVERSION` est la date du commit : un nouveau commit donne une version
+  plus haute, que `pkg upgrade` voit.
+
+== GED (Active Storage)
+
+L'initialiseur injecté (`config/initializers/zzz_crystalize.rb`) déclare
+un service `crystalize` et l'impose à Active Storage :
+
+`none`:: rien n'est modifié (configuration de l'application).
+`clear`:: service `Disk` sur `storage.path`.
+`encrypted`:: service `EncryptedDisk` (livré par crystalize) :
+  AES-256-GCM par blocs de 64 Kio, nonce par fichier, chaque bloc lié à la
+  clé du blob, à son rang et à sa position finale (troncature, permutation
+  et altération détectées). Lectures partielles (`download_chunk`) et
+  flux sans tout déchiffrer. Les URL passent par le mode proxy de Rails
+  (`rails_storage_proxy`) pour ne jamais servir le fichier chiffré brut.
+
+WARNING: Perdre `storage_key`, c'est perdre la GED. Sauvegardez-la à part
+des fichiers.
+
+== Reproductibilité
+
+Deux constructions du même commit, avec le même Ruby en cache, donnent un
+exécutable identique octet pour octet :
+
+* archive tar triée, dates fixées à celle du commit, propriétaire et droits
+  normalisés, en-tête gzip sans date ;
+* `ZERO_AR_DATE=1` pendant la construction (dates des `.o` sous macOS) ;
+* `strip -S` sur les extensions natives (leurs symboles de débogage citent
+  des fichiers temporaires aux noms aléatoires) puis, sous macOS, nouvelle
+  signature ad hoc ; désactivable par `bundle.strip_native: false` ;
+* journaux `gem_make.out`, `mkmf.log` et dossiers `.dSYM` élagués.
+
+== Limites connues
+
+* Une construction par plate-forme cible (voir Prérequis).
+* Les bibliothèques partagées (OpenSSL, libyaml, libffi, libpq) ne sont pas
+  embarquées : elles doivent être présentes sur la cible.
+* Le pseudo-code est lié à la version exacte de Ruby embarquée (garanti
+  par construction).
+* La clé de GED transite par l'environnement du processus Ruby.
+* Les noms de fonction de premier niveau apparaissent comme `<compiled>`
+  dans les traces d'appel.
